@@ -80,26 +80,37 @@ def training_model(model, dataloader, num_epochs, learning_rate, device):
 
 
 # ======================================================
-# EVALUATE (SIN CAMBIOS)
+# EVALUATE (VERSIÓN CORRECTA)
 # ======================================================
 def evaluate_model(model, dataloader, device):
     model.eval()
     model.to(device)
 
-    preds_all, targets_all = [], []
+    criterion = nn.L1Loss()
+    total_loss = 0.0
+
+    all_preds = []
+    all_targets = []
 
     with torch.no_grad():
         for x_batch, y_batch in dataloader:
             x_batch = x_batch.to(device)
+            y_batch = y_batch.to(device)
+
             preds = model(x_batch)
+            loss = criterion(preds, y_batch)
 
-            preds_all.append(preds.cpu().numpy())
-            targets_all.append(y_batch.numpy())
+            total_loss += loss.item() * x_batch.size(0)
 
-    return (
-        np.concatenate(preds_all, axis=0),
-        np.concatenate(targets_all, axis=0),
-    )
+            all_preds.append(preds.cpu().numpy())
+            all_targets.append(y_batch.cpu().numpy())
+
+    mean_loss = total_loss / len(dataloader.dataset)
+
+    all_preds = np.concatenate(all_preds, axis=0)
+    all_targets = np.concatenate(all_targets, axis=0)
+
+    return mean_loss, all_preds, all_targets
 
 
 # ======================================================
@@ -213,7 +224,8 @@ def main():
                 device,
             )
 
-            val_preds, val_targets = evaluate_model(model, dl_val, device)
+            val_loss, val_preds, val_targets = evaluate_model(model, dl_val, device)
+            print(f"Validation MAE (log): {val_loss:.4f}")
 
             val_preds_real = np.expm1(val_preds[:, 0])
             val_targets_real = np.expm1(val_targets[:, 0])
@@ -245,8 +257,8 @@ def main():
 
         print(f"\n🏆 Best model saved: {best_name}")
 
-        # ------------------ TEST EVALUATION ------------------
-        print("\n🔴 Evaluating best model on TEST set")
+        # ------------------ TEST ------------------
+        print("\n🔴 Evaluating best model on TEST")
 
         best_model = {
             "LSTM": LSTM_two_layers,
@@ -263,12 +275,12 @@ def main():
         best_model.load_state_dict(best_state)
         best_model.to(device)
 
-        test_preds, test_targets = evaluate_model(best_model, dl_test, device)
+        test_loss, test_preds, test_targets = evaluate_model(best_model, dl_test, device)
+        print(f"Test MAE (log): {test_loss:.4f}")
 
         test_preds_real = np.expm1(test_preds[:, 0])
         test_targets_real = np.expm1(test_targets[:, 0])
 
-        print("\n📊 TEST RESULTS")
         print("RMSE ↓ :", rmse(test_targets_real, test_preds_real))
         print(
             "MASE ↓ :",
@@ -315,7 +327,8 @@ def main():
     )
     dl_inf = DataLoader(ds_inf, batch_size=config["batch_size"], shuffle=False)
 
-    inf_preds, inf_targets = evaluate_model(model, dl_inf, device)
+    inf_loss, inf_preds, inf_targets = evaluate_model(model, dl_inf, device)
+    print(f"Inference MAE (log): {inf_loss:.4f}")
 
     inf_preds_real = np.expm1(inf_preds[:, 0])
     inf_targets_real = np.expm1(inf_targets[:, 0])
