@@ -41,7 +41,15 @@ def load_trained_model(checkpoint_path, device):
     # ---- Sanity checks ----
     assert "model_name" in checkpoint, "Checkpoint missing model_name"
     assert "state_dict" in checkpoint, "Checkpoint missing state_dict"
-    assert "model_params" in checkpoint, "Checkpoint missing model_params"
+    cfg = checkpoint["config"]
+
+    model_params = {
+        "input_size": cfg["model"]["input_size"] if "input_size" in cfg["model"] else None,
+        "hidden_size": cfg["model"]["hidden_size"],
+        "output_window": cfg["model"]["output_window"],
+        "output_size": cfg["model"].get("output_size", cfg["model"]["output_window"]),
+        "dropout": cfg["model"]["dropout"],
+    }
 
     model_name = checkpoint["model_name"]
     model_params = checkpoint["model_params"]
