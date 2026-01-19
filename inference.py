@@ -1,84 +1,143 @@
+# ======================================================
+# ===================== INFERENCE ======================
+# ======================================================
+
+import yaml
 import torch
 import numpy as np
-import yaml
 import pandas as pd
 import torch.nn as nn
 
+from pathlib import Path
 from torch.utils.data import DataLoader
+
+# Reutilizamos el Dataset de training
 from train import TimeSeriesDataset
 
+# Modelo (elige uno solo aquí)
 from models.LSTM import LSTM_two_layers
-from models.GRU import GRU_two_layers
-from models.LSTM_FCN import LSTM_FCN
-from models.Transformer import TransformerForecast
 
+# Plots (ajusta imports si tus nombres difieren)
 from utils.plots import (
     plot_continuous_horizon0,
     plot_one_day,
     plot_scatter_real_vs_pred,
 )
-from utils.metrics import rmse, mase
+
+
+# -----------------------------
+# Metrics
+# -----------------------------
+def rmse(y_true, y_pred):
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+    return np.sqrt(np.mean((y_true - y_pred) ** 2))
+
+
+def mase(y_true, y_pred, y_train, m=24):
+    """
+    MASE correcto:
+    - denominador: MAE del naive estacional en TRAIN (y_train)
+    """
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+    y_train = np.asarray(y_train)
+
+    if len(y_train) <= m:
+        raise ValueError(f"y_train demasiado corto para m={m}")
+
+    scale = np.mean(np.abs(y_train[m:] - y_train[:-m]))
+    return np.mean(np.abs(y_true - y_pred)) / (scale + 1e-8)
 
 
 def main():
+    # --------------------------------------------------
+    # Paths
+    # --------------------------------------------------
+    CONFIG_PATH = "config/timeseries.yaml"
+    CKPT_PATH = "best_model.pth"
+    DATA_DIR = Path("data/Processed")
 
+    INFERENCE_XLSX = DATA_DIR / "inference.xlsx"
+    TRAIN_XLSX = DATA_DIR / "train.xlsx"
+
+    # --------------------------------------------------
+    # Device
+    # --------------------------------------------------
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    print("Using device:", device)
 
     # --------------------------------------------------
-    # Config
+    # Load config
     # --------------------------------------------------
-    with open("config/timeseries.yaml") as f:
+    with open(CONFIG_PATH, "r") as f:
         cfg = yaml.safe_load(f)["model"]
 
-    # --------------------------------------------------
-    # Load checkpoint (PyTorch 2.6+ compatible)
-    # --------------------------------------------------
-    checkpoint = torch.load(
-        "best_model.pth",
-        map_location=device,
-        weights_only=False,
-    )
+    length = cfg["length"]
+    lag = cfg["lag"]
+    output_window = cfg["output_window"]
+    batch_size = cfg["batch_size"]
 
-    model_name = checkpoint["model_name"]
+    # --------------------------------------------------
+    # Load checkpoint
+    # --------------------------------------------------
+    checkpoint = torch.load(CKPT_PATH, map_location=device, weights_only=False)
+
     train_cols = checkpoint["feature_columns"]
     input_size = checkpoint["input_size"]
 
     # --------------------------------------------------
-    # Load inference data as DataFrame
+    # Load inference data
     # --------------------------------------------------
-    df = pd.read_excel("data/Processed/inference.xlsx", index_col=0)
+    if not INFERENCE_XLSX.exists():
+        raise FileNotFoundError(f"No existe {INFERENCE_XLSX}")
 
-    y = df["Energy"].to_numpy(dtype=np.float32)
-    X_df = df.drop(columns=["Energy"])
+    df_inf = pd.read_excel(INFERENCE_XLSX, index_col=0)
 
-    # --------------------------------------------------
-    # FEATURE ALIGNMENT (ROBUST, SIN DUMMIES)
-    # --------------------------------------------------
-    # - elimina columnas extra
-    # - añade columnas faltantes con 0
-    # - respeta el orden del training
-    X_df = X_df.reindex(columns=train_cols, fill_value=0.0)
+    if "Energy" not in df_inf.columns:
+        raise ValueError(
+            "inference.xlsx debe contener columna 'Energy' para métricas. "
+            "Si solo quieres predicciones sin métricas, dímelo y te lo adapto."
+        )
 
-    # Safety check
-    assert X_df.shape[1] == input_size, (
-        f"Feature mismatch: {X_df.shape[1]} vs {input_size}"
-    )
-
-    X = X_df.to_numpy(dtype=np.float32)
+    y_inf = df_inf["Energy"].to_numpy(dtype=np.float32)
+    X_inf_df = df_inf.drop(columns=["Energy"])
 
     # --------------------------------------------------
-    # Build model (same as training)
+    # Feature alignment (robusto)
+    # - elimina extra
+    # - añade faltantes con 0
+    # - respeta orden del training
     # --------------------------------------------------
-    model = {
-        "LSTM": LSTM_two_layers,
-        "GRU": GRU_two_layers,
-        "LSTM_FCN": LSTM_FCN,
-        "Transformer": TransformerForecast,
-    }[model_name](
-        input_size,
-        cfg["hidden_size"],
-        cfg["output_window"],
-        cfg["dropout"],
+    X_inf_df = X_inf_df.reindex(columns=train_cols, fill_value=0.0)
+
+    if X_inf_df.shape[1] != input_size:
+        raise ValueError(f"Feature mismatch: {X_inf_df.shape[1]} vs {input_size}")
+
+    X_inf = X_inf_df.to_numpy(dtype=np.float32)
+
+    # --------------------------------------------------
+    # Load train_y for MASE scaling
+    # --------------------------------------------------
+    if not TRAIN_XLSX.exists():
+        raise FileNotFoundError(
+            f"No existe {TRAIN_XLSX}. Necesito train.xlsx para escalar MASE correctamente."
+        )
+
+    df_train = pd.read_excel(TRAIN_XLSX, index_col=0)
+    if "Energy" not in df_train.columns:
+        raise ValueError("train.xlsx debe contener columna 'Energy'")
+
+    train_y = df_train["Energy"].to_numpy(dtype=np.float32)
+
+    # --------------------------------------------------
+    # Build model (solo LSTM)
+    # --------------------------------------------------
+    model = LSTM_two_layers(
+        input_size=input_size,
+        hidden_size=cfg["hidden_size"],
+        output_size=cfg["output_size"],  # normalmente 1
+        dropout=cfg["dropout"],
     )
 
     model.load_state_dict(checkpoint["state_dict"])
@@ -89,73 +148,76 @@ def main():
     # Dataset & DataLoader
     # --------------------------------------------------
     ds = TimeSeriesDataset(
-        X,
-        y,
-        cfg["length"],
-        cfg["lag"],
-        cfg["output_window"],
+        X_inf,
+        y_inf,
+        length=length,
+        lag=lag,
+        output_window=output_window,
         stride=24,
     )
 
-    dl = DataLoader(
-        ds,
-        batch_size=cfg["batch_size"],
-        shuffle=False,
-    )
+    dl = DataLoader(ds, batch_size=batch_size, shuffle=False)
 
     # --------------------------------------------------
-    # Inference
+    # Inference loop
     # --------------------------------------------------
     preds, targets = [], []
 
     with torch.no_grad():
         for x, t in dl:
-            preds.append(model(x.to(device)).cpu().numpy())
+            x = x.to(device)
+            p = model(x).cpu().numpy()
+            preds.append(p)
             targets.append(t.numpy())
 
-    preds = np.concatenate(preds)
-    targets = np.concatenate(targets)
+    preds = np.concatenate(preds, axis=0)
+    targets = np.concatenate(targets, axis=0)
 
     # --------------------------------------------------
-    # Metrics / Losses (NO TRAMPA, TODO EL DATASET)
+    # Convert log -> real (kWh)
+    # (asumiendo que Energy está en log1p)
     # --------------------------------------------------
-    rmse_all = rmse(targets[:, 0], preds[:, 0])
-    mase_all = mase(targets[:, 0], preds[:, 0], targets[:, 0])
+    preds_real = np.expm1(preds)
+    targets_real = np.expm1(targets)
+    train_y_real = np.expm1(train_y)
+
+    # --------------------------------------------------
+    # Metrics (horizon 0)
+    # --------------------------------------------------
+    y_true_h0 = targets_real[:, 0]
+    y_pred_h0 = preds_real[:, 0]
+
+    rmse_h0 = rmse(y_true_h0, y_pred_h0)
+    mase_h0 = mase(y_true_h0, y_pred_h0, train_y_real, m=24)
 
     huber = nn.HuberLoss(delta=1.0)
-    huber_loss = huber(
-        torch.tensor(preds[:, 0]),
-        torch.tensor(targets[:, 0]),
+    huber_h0 = huber(
+        torch.tensor(y_pred_h0, dtype=torch.float32),
+        torch.tensor(y_true_h0, dtype=torch.float32),
     ).item()
 
+    print("\n================ METRICS (INFERENCE) ================")
+    print(f"RMSE(h0)  : {rmse_h0:.4f} kWh")
+    print(f"MASE(h0)  : {mase_h0:.4f}")
+    print(f"Huber(h0) : {huber_h0:.4f}")
+    print("=====================================================\n")
 
-    # Guardar checkpoint (ej: al final o cuando sea el mejor)
-    torch.save(
-        {
-            "model_name": "LSTM",  # o "GRU", "Transformer", etc.
-            "input_size": input_size,
-            "state_dict": model.state_dict(),
-        },
-        "best_model.pth"
-    )
-    print("Guardado best_model.pth")
+    print("Preds_real min/max:", float(preds_real.min()), float(preds_real.max()))
+    print("Targets_real min/max:", float(targets_real.min()), float(targets_real.max()))
 
-
-    print("\n================ METRICS (ALL DATA) ================")
-    print(f"RMSE  : {rmse_all:.4f}")
-    print(f"MASE  : {mase_all:.4f}")
-    print(f"Huber : {huber_loss:.4f}")
-    print("===================================================\n")
-
-    print("Preds min/max:", preds.min(), preds.max())
-    print("Targets min/max:", targets.min(), targets.max())
+    # --------------------------------------------------
+    # Save predictions (opcional)
+    # --------------------------------------------------
+    out_path = Path("preds_inference_horizons.csv")
+    pd.DataFrame(preds_real).to_csv(out_path, index=False)
+    print(f"Predicciones guardadas en: {out_path}")
 
     # --------------------------------------------------
     # Plots
     # --------------------------------------------------
-    plot_continuous_horizon0(targets, preds)
-    plot_one_day(targets, preds, day_idx=0)
-    plot_scatter_real_vs_pred(targets, preds)
+    plot_continuous_horizon0(targets_real, preds_real)
+    plot_one_day(targets_real, preds_real, day_idx=0)
+    plot_scatter_real_vs_pred(targets_real, preds_real)
 
 
 if __name__ == "__main__":
