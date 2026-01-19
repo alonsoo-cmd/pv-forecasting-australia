@@ -142,31 +142,54 @@ def run_inference():
     # --------------------------------------------------
     # INFERENCE
     # --------------------------------------------------
+    
+
+    # --------------------------------------------------
+    # INFERENCE
+    # --------------------------------------------------
     preds, targets = inference_model(model, dl_inf, device)
 
     # --------------------------------------------------
-    # NO DESNORMALIZACIÓN (modelo entrenado en kWh)
+    # DESNORMALIZAR Y (volver a kWh reales)
     # --------------------------------------------------
-    preds_real = preds
-    targets_real = targets
+    import pickle
+
+    with open(f"{DATA_PATH}/stats.pkl", "rb") as f:
+        stats = pickle.load(f)
+
+    y_mu = stats["Y"]["mu"]["Energy"]
+    y_std = stats["Y"]["std"]["Energy"]
+
+    preds_real = preds * y_std + y_mu
+    targets_real = targets * y_std + y_mu
 
     # --------------------------------------------------
-    # METRICS (solo horas con producción)
+    # METRICS
     # --------------------------------------------------
-    mask = targets_real[:, 0] > 0.1
+    # Usar el scale ya calculado en TRAIN
+    mase_scale = stats["mase"]["scale"]
 
-    mae_h0 = np.mean(
-        np.abs(preds_real[mask, 0] - targets_real[mask, 0])
+    # MASE horizon = 0 (todas las horas)
+    mase_h0 = (
+        np.mean(np.abs(preds_real[:, 0] - targets_real[:, 0]))
+        / mase_scale
     )
 
+    # RMSE horizon = 0
     rmse_h0 = np.sqrt(
-        np.mean((preds_real[mask, 0] - targets_real[mask, 0]) ** 2)
+        np.mean((preds_real[:, 0] - targets_real[:, 0]) ** 2)
     )
 
     print("\n========== INFERENCE METRICS ==========")
     print(f"Model: {model_name}")
-    print(f"MAE horizon=0 (kWh):  {mae_h0:.3f}")
-    print(f"RMSE horizon=0 (kWh): {rmse_h0:.3f}")
+    print(f"MASE horizon=0 (all hours): {mase_h0:.4f}")
+    print(f"RMSE horizon=0 (kWh):       {rmse_h0:.4f}")
+
+
+
+
+
+    
 
     # --------------------------------------------------
     # PLOTS
