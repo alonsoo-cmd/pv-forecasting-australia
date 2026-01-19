@@ -373,6 +373,26 @@ def training():
     print("Test MASE horizon=0:", mase_test_h0)
     print("Test MASE (all horizons):", mase_test_all)
 
+    # --------------------------------------------------
+    # SAVE MODEL
+    # --------------------------------------------------
+    MODEL_PATH = "./checkpoints/lstm_model.pt"
+    Path(MODEL_PATH).parent.mkdir(parents=True, exist_ok=True)
+
+    torch.save({
+        "model_state_dict": model.state_dict(),
+        "config": {
+            "input_size": input_size,
+            "hidden_size": hidden_size,
+            "output_size": output_size,
+            "dropout": dropout,
+            "length": length,
+            "lag": lag,
+            "output_window": output_window,
+        }
+    }, MODEL_PATH)
+
+    print(f"Model saved to {MODEL_PATH}")
 
 
 if __name__ == "__main__":
