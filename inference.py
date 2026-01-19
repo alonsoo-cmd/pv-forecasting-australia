@@ -2,9 +2,11 @@ import torch
 import numpy as np
 import yaml
 import pandas as pd
+import torch.nn as nn
 
 from torch.utils.data import DataLoader
 from train import TimeSeriesDataset
+
 from models.LSTM import LSTM_two_layers
 from models.GRU import GRU_two_layers
 from models.LSTM_FCN import LSTM_FCN
@@ -15,6 +17,7 @@ from utils.plots import (
     plot_one_day,
     plot_scatter_real_vs_pred,
 )
+from utils.metrics import rmse, mase
 
 
 def main():
@@ -49,52 +52,22 @@ def main():
     X_df = df.drop(columns=["Energy"])
 
     # --------------------------------------------------
-    # FEATURE COMPARISON (DEBUG / EXPLANATION)
-    # --------------------------------------------------
-    train_cols_set = set(train_cols)
-    inf_cols_set = set(X_df.columns)
-
-    missing_in_inf = train_cols_set - inf_cols_set
-    extra_in_inf = inf_cols_set - train_cols_set
-
-    print("\n================ FEATURE COMPARISON ================")
-    print(f"Train features ({len(train_cols_set)}):")
-    print(sorted(train_cols_set))
-
-    print(f"\nInference features ({len(inf_cols_set)}):")
-    print(sorted(inf_cols_set))
-
-    print(f"\nMissing in inference → added as 0 ({len(missing_in_inf)}):")
-    print(sorted(missing_in_inf))
-
-    print(f"\nExtra in inference → removed ({len(extra_in_inf)}):")
-    print(sorted(extra_in_inf))
-    print("===================================================\n")
-
-    # --------------------------------------------------
-    # FORCE FEATURE ALIGNMENT (BEST PRACTICE)
+    # FEATURE ALIGNMENT (ROBUST, SIN DUMMIES)
     # --------------------------------------------------
     # - elimina columnas extra
     # - añade columnas faltantes con 0
-    # - mantiene el orden del training
-    X_df = X_df.reindex(
-        columns=train_cols,
-        fill_value=0.0
-    )
+    # - respeta el orden del training
+    X_df = X_df.reindex(columns=train_cols, fill_value=0.0)
 
-    # HARD SAFETY CHECK
+    # Safety check
     assert X_df.shape[1] == input_size, (
-        f"Feature mismatch after alignment: "
-        f"{X_df.shape[1]} vs {input_size}"
+        f"Feature mismatch: {X_df.shape[1]} vs {input_size}"
     )
 
-    # --------------------------------------------------
-    # Convert to NumPy (ONLY NOW)
-    # --------------------------------------------------
     X = X_df.to_numpy(dtype=np.float32)
 
     # --------------------------------------------------
-    # Build model (MUST match training)
+    # Build model (same as training)
     # --------------------------------------------------
     model = {
         "LSTM": LSTM_two_layers,
@@ -143,15 +116,33 @@ def main():
     preds = np.concatenate(preds)
     targets = np.concatenate(targets)
 
+    # --------------------------------------------------
+    # Metrics / Losses (NO TRAMPA, TODO EL DATASET)
+    # --------------------------------------------------
+    rmse_all = rmse(targets[:, 0], preds[:, 0])
+    mase_all = mase(targets[:, 0], preds[:, 0], targets[:, 0])
+
+    huber = nn.HuberLoss(delta=1.0)
+    huber_loss = huber(
+        torch.tensor(preds[:, 0]),
+        torch.tensor(targets[:, 0]),
+    ).item()
+
+    print("\n================ METRICS (ALL DATA) ================")
+    print(f"RMSE  : {rmse_all:.4f}")
+    print(f"MASE  : {mase_all:.4f}")
+    print(f"Huber : {huber_loss:.4f}")
+    print("===================================================\n")
+
+    print("Preds min/max:", preds.min(), preds.max())
+    print("Targets min/max:", targets.min(), targets.max())
 
     # --------------------------------------------------
     # Plots
     # --------------------------------------------------
     plot_continuous_horizon0(targets, preds)
-    plot_one_day(targets, preds,0)
+    plot_one_day(targets, preds, day_idx=0)
     plot_scatter_real_vs_pred(targets, preds)
-    print("Preds log min/max:", preds.min(), preds.max())
-    print("Targets log min/max:", targets.min(), targets.max())
 
 
 if __name__ == "__main__":
