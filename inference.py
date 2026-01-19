@@ -8,7 +8,7 @@ from pathlib import Path
 from torch.utils.data import DataLoader
 
 from models.LSTM import LSTM_two_layers
-from Pipeline import TimeSeriesDataset, load_split
+import Pipeline  # 👈 IMPORTAMOS EL MÓDULO, NO LOS SÍMBOLOS
 
 # ======================================================
 # =================== HELPERS ==========================
@@ -34,8 +34,8 @@ def load_trained_model(model_class, checkpoint_path, device):
 
 def inference_model(model, dataloader, device):
     preds = []
-
     model.eval()
+
     with torch.no_grad():
         for x, _ in dataloader:
             x = x.to(device)
@@ -61,9 +61,9 @@ def run_inference():
     )
 
     # ------------------ LOAD DATA ---------------------
-    inf_x, inf_y = load_split("inference", DATA_PATH)
+    inf_x, inf_y = Pipeline.load_split("inference", DATA_PATH)
 
-    ds_inf = TimeSeriesDataset(
+    ds_inf = Pipeline.TimeSeriesDataset(
         inf_x,
         inf_y,
         length=cfg["length"],
@@ -77,7 +77,6 @@ def run_inference():
     # ------------------ INFERENCE ----------------------
     preds = inference_model(model, dl_inf, device)
 
-    # Invertir log
     preds_real = np.expm1(preds)
 
     # ------------------ SAVE ---------------------------
