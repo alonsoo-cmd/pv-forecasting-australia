@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 from pathlib import Path
-
+import pickle
 
 #debemos normalizar de tal forma que haya muchos ceros 
 
@@ -95,7 +95,7 @@ def factorizar_weather_description(x_df, col="weather_description", sort=True):
     x_df = x_df.copy()
     ids, vocab = pd.factorize(x_df[col], sort=sort)
     x_df[col] = ids
-    return x_df, vocab
+    return x_df
 
 def transformar_y(y):
     y = y.copy()
@@ -112,7 +112,6 @@ def parsear_dt_iso_16(x_df, col="dt_iso", tz_destino=None):
     """
     x_df = x_df.copy()
 
-    
     s = (
         x_df[col].astype("string").str.strip().str[:16].str.replace("T", " ", regex=False)
     )
@@ -214,8 +213,7 @@ def fit_stats(train_df):
     # columnas continuas (NO binarias ni cíclicas)
     numeric_cols = []
     for c in train_df.columns:
-        if not pd.api.types.is_numeric_dtype(train_df[c]):
-            continue
+        
 
         # no normalizar binarias
         if train_df[c].dropna().isin([0, 1]).all():
@@ -238,6 +236,18 @@ def apply_stats(df: pd.DataFrame, numeric_cols, mu, std):
     df[numeric_cols] = (df[numeric_cols] - mu) / std
     return df
 
+def cargar_stats(out_dir=OUT_DIR, filename="stats.pkl"):
+    with open(Path(out_dir) / filename, "rb") as f:
+        stats = pickle.load(f)
+
+    return (
+        stats["X"]["numeric_cols"],
+        stats["X"]["mu"],
+        stats["X"]["std"],
+        stats["Y"]["numeric_cols"],
+        stats["Y"]["mu"],
+        stats["Y"]["std"],
+    )
 
 
 # -----------------------------
@@ -247,8 +257,7 @@ def preparar_x_df(x_df, tz_destino=None, valor_weather_nulo="desconocido"):
     x_df = x_df.copy()
     x_df = rellenar_weather_description(x_df, valor=valor_weather_nulo)
     
-    x_df = pd.get_dummies(x_df,columns=["weather_description"],prefix="wd", dtype = int)
-    
+    x_df = factorizar_weather_description(x_df, col="weather_description", sort=True)
     # parse datetime
     x_df = parsear_dt_iso_16(x_df, tz_destino=tz_destino)
     
@@ -268,7 +277,42 @@ def preparar_x_df(x_df, tz_destino=None, valor_weather_nulo="desconocido"):
     
     return x_df
 
-def dividir_x_df(x_df, train_frac=0.7, val_frac=0.15, quitar_tz_excel=True):
+def split_por_indices(df, train_frac=0.7, val_frac=0.15):
+    df = df.copy()
+    n = len(df)
+
+    train_end = int(n * train_frac)
+    val_end   = int(n * (train_frac + val_frac))
+
+    train = df.iloc[:train_end]
+    val   = df.iloc[train_end:val_end]
+    test  = df.iloc[val_end:]
+
+    return train, val, test
+
+
+
+def dividir(x_df, train_frac=0.8, val_frac=0.10):
+    # split por índices (temporal)
+    train, val, test = split_por_indices(x_df, train_frac=train_frac, val_frac=val_frac)
+    return train, val, test
+
+
+
+def normalizar_df(train, val, test, quitar_tz_excel=True):
+     # normalización sin leakage (fit en train)
+    numeric_cols, mu, std = fit_stats(train)
+    train = apply_stats(train, numeric_cols, mu, std)
+    val   = apply_stats(val, numeric_cols, mu, std)
+    test  = apply_stats(test, numeric_cols, mu, std)
+
+    if quitar_tz_excel:
+        train = quitar_timezone_indice(train)
+        val   = quitar_timezone_indice(val)
+        test  = quitar_timezone_indice(test)
+    return train, val, test 
+
+def dividir_x_normalizar_df(x_df, train_frac=0.7, val_frac=0.15, quitar_tz_excel=True):
     # split por índices (temporal)
     train, val, test = split_por_indices(x_df, train_frac=train_frac, val_frac=val_frac)
 
@@ -282,10 +326,16 @@ def dividir_x_df(x_df, train_frac=0.7, val_frac=0.15, quitar_tz_excel=True):
         train = quitar_timezone_indice(train)
         val   = quitar_timezone_indice(val)
         test  = quitar_timezone_indice(test)
-
-
     return train, val, test
 
+
+def normalizar_df(x_df, numeric_cols, mu, std, quitar_tz_excel=True):
+    # split por índices (temporal)
+    # normalización sin leakage (fit en train)
+    x_df = apply_stats(x_df, numeric_cols, mu, std)
+    if quitar_tz_excel:
+        x_df = quitar_timezone_indice(x_df)
+    return x_df
 
 def preparar_y_df(y_df):
     """
@@ -301,15 +351,30 @@ def preparar_y_df(y_df):
 
     # ordenar e indexar
     y_df = ordenar_y_indexar_por_fecha(y_df, col="dt_iso")
-    return y_df 
-def dividir_y_df(y_df, train_frac=0.7, val_frac=0.15):
+    return y_df
+
+
+def normalizar_indice_horario(df):
+    df = df.copy()
+    df.index = pd.to_datetime(df.index).dt.floor("H")
+    return df
+
+
+def dividir(y_df, train_frac=0.8, val_frac=0.10):
+    train, val, test = split_por_indices(y_df, train_frac=train_frac, val_frac=val_frac)
+    return train, val, test
+
+
+
+def dividir_y_normalizar_df(y_df, train_frac=0.7, val_frac=0.15):
     # split temporal
     train, val, test = split_por_indices(y_df, train_frac=train_frac, val_frac=val_frac)
 
     
-    train = transformar_y(train)
-    val   = transformar_y(val)
-    test  = transformar_y(test)
+    numeric_cols, mu, std = fit_stats(train)
+    train = apply_stats(train, numeric_cols, mu, std)
+    val   = apply_stats(val, numeric_cols, mu, std)
+    test  = apply_stats(test, numeric_cols, mu, std)
 
     train = quitar_timezone_indice(train)
     val   = quitar_timezone_indice(val)
@@ -317,7 +382,7 @@ def dividir_y_df(y_df, train_frac=0.7, val_frac=0.15):
 
     return train, val, test
 
-def pipeline_training():
+def pipeline():
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
     # cargar raw
@@ -337,62 +402,74 @@ def pipeline_training():
     x_df, y_df = x_df.align(y_df, join="inner", axis=0)
 
     # split X
-    x_train, x_val, x_test = dividir_x_df(
-        x_df,
-        train_frac=0.7,
-        val_frac=0.15,
-        quitar_tz_excel=True
-    )
 
-    # split Y
-    y_train, y_val, y_test = dividir_y_df(
-        y_df,
-        train_frac=0.7,
-        val_frac=0.15
-    )
+    x_train, x_val, x_test = dividir(x_df, train_frac=0.8, val_frac=0.10)
+    x_cols, x_mu, x_std = fit_stats(x_train)
+    x_train = normalizar_df(x_train, x_cols, x_mu, x_std, quitar_tz_excel=True)
+    x_val = normalizar_df(x_val, x_cols, x_mu, x_std, quitar_tz_excel=True)
+    x_test = normalizar_df(x_test, x_cols, x_mu, x_std, quitar_tz_excel=True)
+    
+    y_train, y_val, y_test = dividir(y_df, train_frac=0.8, val_frac=0.10)
+    y_cols, y_mu, y_std = fit_stats(y_train)
+    y_train = normalizar_df(y_train, y_cols, y_mu, y_std,quitar_tz_excel=True)
+    y_val = normalizar_df(y_val, y_cols, y_mu, y_std,quitar_tz_excel=True)
+    y_test =  normalizar_df(y_test, y_cols, y_mu, y_std,quitar_tz_excel=True)
 
     # unir X e Y
     train = unir_x_y(x_train, y_train)
     val   = unir_x_y(x_val, y_val)
     test  = unir_x_y(x_test, y_test)
 
+
     # guardar conjuntos
     save_joint_splits(train, val, test, OUT_DIR)
-
     print("Train:", train.shape)
     print("Val:", val.shape)
     print("Test:", test.shape)
+    
 
-def pipeline_inference():
+
+    print("\n--- Iniciando Normalización de Inferencia ---")
+    
+    # 1. Cargar datos brutos de la hoja de inferencia
     x_df_2 = cargar_excel(ruta_x, hoja=2)
     y_df_2 = cargar_excel(ruta_y, hoja=2)
-    # preparar por separado
-    x_df_inference = preparar_x_df(x_df_2)
-    y_df_inference = preparar_y_df(y_df_2)
-    
-    x_df_inference = normalizar_dt_df(x_df_inference)
-    y_df_inference = normalizar_dt_df(y_df_inference)
 
-    # ALINEAR DE VERDAD
-    x_df_inference, y_df_inference = x_df_inference.align(
-        y_df_inference,
-        join="inner",
-        axis=0,
-    )
-    # comprobación (opcional pero recomendable)
-    assert x_df_inference.index.equals(y_df_inference.index)
-    # alinear por tiempo
-    #x_df_inference, y_df_inference = x_df.align(y_df, join="inner", axis=0)
-    inference = unir_x_y(x_df_inference, y_df_inference, y_col="Energy")
-    # guardar conjuntos
-    inference.drop(columns=["Energy"])
-    inference.to_excel(OUT_DIR/ "inference.xlsx", index=True)
+    # 2. Preprocesamiento (Cálculo de senos/cosenos, limpieza de columnas)
+    x_df_inf = preparar_x_df(x_df_2)
+    y_df_inf = preparar_y_df(y_df_2)
+
+    # 3. Alineación temporal
+    x_df_inf = normalizar_dt_df(x_df_inf)
+    y_df_inf = normalizar_dt_df(y_df_inf)
+    x_df_inf, y_df_inf = x_df_inf.align(y_df_inf, join="inner", axis=0)
+
+    # 5. NORMALIZAR X (Variables de entrada: Temperatura, nubes, etc.)
+    # Aquí es donde fallaba: aplicamos las stats de entrenamiento a x_df_inf
+    x_df_inf = apply_stats(x_df_inf, x_cols, x_mu, x_std)
+    
+    # 6. NORMALIZAR Y (Variable objetivo: Energía)
+    # Paso A: Logaritmo (porque el entrenamiento se hizo sobre logaritmos)
+    #y_df_inf = transformar_y(y_df_inf)
+    # Paso B: Z-Score con medias de entrenamiento
+    y_df_inf = apply_stats(y_df_inf, y_cols, y_mu, y_std)
+
+    # 7. Quitar Timezone para exportar a Excel
+    x_df_inf = quitar_timezone_indice(x_df_inf)
+    y_df_inf = quitar_timezone_indice(y_df_inf)
+
+    # 8. Unir y Guardar
+    inference = unir_x_y(x_df_inf, y_df_inf)
+    inference.to_excel(OUT_DIR / "inference.xlsx", index=True)
+    
+    print("Variables de X e Y normalizadas con éxito.")
+    print("Columnas procesadas en X:", x_cols)
+    print("Ejemplo de valores en X (deberían estar cerca de 0):")
+    print(x_df_inf[x_cols].head(3))
+
 
 def main():
-    pipeline_training()
-    pipeline_inference()
-
-
+    pipeline()
 
 if __name__ == "__main__":
     main()

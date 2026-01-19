@@ -142,6 +142,37 @@ def fit_stats(train_df):
     std = train_df[numeric_cols].std().replace(0, 1.0)
     return numeric_cols, mu, std
 
+def fit_stats_y(train_y_df, col="Energy"):
+    mu = train_y_df[col].mean()
+    std = train_y_df[col].std()
+    if std == 0 or np.isnan(std):
+        std = 1.0
+    return float(mu), float(std)
+
+def apply_stats_y(y_df, mu, std, col="Energy"):
+    y_df = y_df.copy()
+    y_df[col] = (y_df[col] - mu) / std
+    return y_df
+
+
+def dividir_y_df(y_df):
+    train, val, test = split_por_indices(y_df)
+
+    # 1) misma transformación base que ya usabas
+    train = transformar_y(train)
+    val = transformar_y(val)
+    test = transformar_y(test)
+
+    # 2) stats SOLO con TRAIN (como X)
+    mu_y, std_y = fit_stats_y(train, col="Energy")
+
+    # 3) aplicar z-score a train/val/test
+    train = apply_stats_y(train, mu_y, std_y, col="Energy")
+    val = apply_stats_y(val, mu_y, std_y, col="Energy")
+    test = apply_stats_y(test, mu_y, std_y, col="Energy")
+
+    return quitar_timezone_indice(train), quitar_timezone_indice(val), quitar_timezone_indice(test)
+
 
 def apply_stats(df, numeric_cols, mu, std):
     df = df.copy()
@@ -155,7 +186,6 @@ def apply_stats(df, numeric_cols, mu, std):
 def preparar_x_df(x_df):
     x_df = rellenar_weather_description(x_df)
     x_df, _ = factorizar_weather_description(x_df)
-
     x_df = parsear_dt_iso_16(x_df)
     x_df = eliminar_fechas_invalidas(x_df, "dt_iso")
     x_df = extraer_features_circulares(x_df)
@@ -182,12 +212,21 @@ def dividir_x_df(x_df):
     test = apply_stats(test, cols, mu, std)
     return quitar_timezone_indice(train), quitar_timezone_indice(val), quitar_timezone_indice(test)
 
+def implement_x_df(x_df):
+    cols, mu, std = fit_stats(x_df)
+    x_df = apply_stats(x_df, cols, mu, std)
+    return quitar_timezone_indice(x_df)
+
 
 def dividir_y_df(y_df):
     train, val, test = split_por_indices(y_df)
-    train = transformar_y(train)
-    val = transformar_y(val)
-    test = transformar_y(test)
+
+    # normalización z-score con stats SOLO de train (misma técnica que X)
+    cols, mu, std = fit_stats(train)   # aquí cols será ["Energy"]
+    train = apply_stats(train, cols, mu, std)
+    val   = apply_stats(val,   cols, mu, std)
+    test  = apply_stats(test,  cols, mu, std)
+
     return quitar_timezone_indice(train), quitar_timezone_indice(val), quitar_timezone_indice(test)
 
 
@@ -227,11 +266,37 @@ def pipeline_inference():
     x_df = preparar_x_df(cargar_excel(ruta_x, 2))
     y_df = preparar_y_df(cargar_excel(ruta_y, 2))
 
-    x_df = normalizar_dt_df(x_df)
-    y_df = normalizar_dt_df(y_df)
-
+    # alinear
     x_df, y_df = x_df.align(y_df, join="inner", axis=0)
-    unir_x_y(x_df, y_df).to_excel(OUT_DIR / "inference.xlsx")
+
+    # ------- obtener stats desde TRAIN (recalculando desde raw, mínimo cambio) -------
+    x_full = pd.concat([cargar_excel(ruta_x, 0), cargar_excel(ruta_x, 1)])
+    y_full = pd.concat([cargar_excel(ruta_y, 0), cargar_excel(ruta_y, 1)])
+
+    x_full = preparar_x_df(x_full)
+    y_full = preparar_y_df(y_full)
+    x_full, y_full = x_full.align(y_full, join="inner", axis=0)
+
+    # split TRAIN para stats
+    x_train, _, _ = split_por_indices(x_full)
+    y_train, _, _ = split_por_indices(y_full)
+
+    # X stats (train)
+    cols_x, mu_x, std_x = fit_stats(x_train)
+
+    # Y stats (train) -> misma técnica
+    y_train = transformar_y(y_train)          # si mantienes log1p
+    cols_y, mu_y, std_y = fit_stats(y_train)  # cols_y = ["Energy"]
+
+    # aplicar stats a inference
+    x_df = apply_stats(x_df, cols_x, mu_x, std_x)
+
+    y_df = transformar_y(y_df)                # si mantienes log1p
+    y_df = apply_stats(y_df, cols_y, mu_y, std_y)
+
+    OUT_DIR.mkdir(exist_ok=True, parents=True)
+    unir_x_y(quitar_timezone_indice(x_df), quitar_timezone_indice(y_df)).to_excel(OUT_DIR / "inference.xlsx")
+
 
 
 def main():
