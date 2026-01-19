@@ -31,32 +31,37 @@ MODEL_FACTORY = {
 # ======================================================
 # ================= LOAD TRAINED MODEL ================
 # ======================================================
-def load_trained_model(checkpoint_path, device):
+def load_trained_model(checkpoint_path, device, input_size):
     checkpoint = torch.load(
         checkpoint_path,
         map_location=device,
-        weights_only=False,  # 🔑 PyTorch 2.6 fix
+        weights_only=False,
     )
 
-    # ---- Sanity checks ----
-    assert "model_name" in checkpoint, "Checkpoint missing model_name"
-    assert "state_dict" in checkpoint, "Checkpoint missing state_dict"
-    cfg = checkpoint["config"]
-
-    model_params = {
-        "input_size": cfg["model"]["input_size"] if "input_size" in cfg["model"] else None,
-        "hidden_size": cfg["model"]["hidden_size"],
-        "output_window": cfg["model"]["output_window"],
-        "output_size": cfg["model"].get("output_size", cfg["model"]["output_window"]),
-        "dropout": cfg["model"]["dropout"],
-    }
+    assert "model_name" in checkpoint
+    assert "state_dict" in checkpoint
+    assert "config" in checkpoint
 
     model_name = checkpoint["model_name"]
-    model_params = checkpoint["model_params"]
+    cfg = checkpoint["config"]["model"]
 
-    print("\nLoaded checkpoint")
-    print("  model_name:", model_name)
-    print("  model_params:", model_params)
+    # Reconstruir parámetros del modelo
+    if model_name in ["LSTM", "GRU"]:
+        model_params = {
+            "input_size": input_size,
+            "hidden_size": cfg["hidden_size"],
+            "output_size": cfg["output_size"],
+            "dropout": cfg["dropout"],
+        }
+    elif model_name == "LSTM_FCN":
+        model_params = {
+            "input_size": input_size,
+            "hidden_size": cfg["hidden_size"],
+            "output_window": cfg["output_window"],
+            "dropout": cfg["dropout"],
+        }
+    else:
+        raise ValueError(f"Unknown model: {model_name}")
 
     model_class = MODEL_FACTORY[model_name]
     model = model_class(**model_params)
@@ -65,7 +70,12 @@ def load_trained_model(checkpoint_path, device):
     model.to(device)
     model.eval()
 
+    print("\nLoaded checkpoint")
+    print("  model_name:", model_name)
+    print("  model_params:", model_params)
+
     return model, model_name, model_params
+
 
 
 # ======================================================
