@@ -12,10 +12,10 @@ model:
   output_window: 24  
   batch_size: 32     # número de ejemplos por lote y  batch_size = numero de ejemplos que el modelo procesa antes de actualizar los pesos.
   lag: 0
-  length: 72
+  length: 96
   # output_size: es el número de neuronas en la capa final
   hidden_size: 128  # Es decir, hidden_size = h = número de dimensiones del vector que la LSTM “recuerda” y pasa al siguiente paso/layer
   output_size: 24
-  epochs: 30  #cuantas veces se actualizan los pesos del modelo
+  epochs: 50  #cuantas veces se actualizan los pesos del modelo
   learning_rate: 0.001  # tasa de aprendizaje
   dropout: 0.3 #Desconectamos algunas

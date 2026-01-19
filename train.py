@@ -1,42 +1,39 @@
+# ======================================================
+# ===================== IMPORTS ========================
+# ======================================================
 import yaml
 import torch
+import torch.nn as nn
 import numpy as np
 import pandas as pd
-import os
 from pathlib import Path
 from torch.utils.data import Dataset, DataLoader
-import torch.nn as nn
+import pickle
 
-# Nota: Asegúrate de que estas rutas sean correctas en tu entorno de Colab
-# o que los archivos estén en la misma carpeta.
-try:
-    from models.LSTM import LSTM_two_layers
-    from models.GRU import GRU_two_layers
-    from models.LSTM_FCN import LSTM_FCN
-    from models.Transformer import TransformerForecast
-    from utils.metrics import rmse, mase
-except ImportError:
-    print("Asegúrate de subir las carpetas 'models' y 'utils' a tu sesión de Colab.")
+from models.LSTM import LSTM_two_layers
+from models.GRU import GRU_two_layers
+from models.LSTM_FCN import LSTM_FCN
+from models.Transformer import TransformerForecast
 
-# --- DATASET CORREGIDO ---
+# ======================================================
+# =================== DATASET ==========================
+# ======================================================
 class TimeSeriesDataset(Dataset):
     def __init__(self, X, y, length, lag, output_window, stride=1):
-        # Convertimos a tensores en el init para velocidad, pero manejamos la memoria
         self.X = torch.tensor(X, dtype=torch.float32)
         self.y = torch.tensor(y, dtype=torch.float32)
 
-        # Asegurar que y tenga la forma correcta (muestras, ventana)
         if self.y.ndim == 1:
             self.y = self.y.unsqueeze(-1)
+
+        self.length = length
+        self.lag = lag
+        self.output_window = output_window
 
         N = len(X)
         t0_min = lag + length
         t0_max = N - output_window
         self.starts = np.arange(t0_min, t0_max + 1, stride)
-
-        self.length = length
-        self.lag = lag
-        self.output_window = output_window
 
     def __len__(self):
         return len(self.starts)
@@ -47,135 +44,192 @@ class TimeSeriesDataset(Dataset):
         y = self.y[t0 : t0 + self.output_window]
         return x, y
 
-# --- ENTRENAMIENTO MEJORADO ---
+
+# ======================================================
+# =================== METRICS ==========================
+# ======================================================
+def mase_daylight(y_true, y_pred, y_train, m=24):
+    """
+    MASE robusto para PV (solo horas con producción)
+    """
+    y_train = y_train.squeeze()
+    mask = (y_train > 0) & (np.roll(y_train, m) > 0)
+    naive_diff = np.abs(y_train[m:] - y_train[:-m])
+    scale = np.mean(naive_diff[mask[m:]])
+
+    return np.mean(np.abs(y_true - y_pred)) / (scale + 1e-8)
+
+
+# ======================================================
+# =================== HELPERS ==========================
+# ======================================================
+def load_split(name, base_path):
+    df = pd.read_excel(Path(base_path) / f"{name}.xlsx", index_col=0)
+    y = df["Energy"].to_numpy(dtype=np.float32)
+    X = df.drop(columns=["Energy"]).to_numpy(dtype=np.float32)
+    return X, y
+
+
 def train_model(model, dataloader, epochs, lr, device):
     model.to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr) # AdamW es más estable
-    loss_fn = nn.HuberLoss() # Mejor que L1 para evitar saltos bruscos en el gradiente
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+    loss_fn = nn.HuberLoss()
 
     for epoch in range(epochs):
         model.train()
-        total_loss = 0
+        total_loss = 0.0
+
         for x, y in dataloader:
             x, y = x.to(device), y.to(device)
-            
+
             optimizer.zero_grad()
             preds = model(x)
-            
-            # Ajuste de dimensiones si el modelo devuelve (batch, seq, 1) y y es (batch, seq)
+
             if preds.shape != y.shape:
-                preds = preds.squeeze(-1) if preds.shape[-1] == 1 else preds
-            
+                preds = preds.squeeze(-1)
+
             loss = loss_fn(preds, y)
             loss.backward()
             optimizer.step()
+
             total_loss += loss.item()
-        
+
         if (epoch + 1) % 10 == 0:
             print(f"Epoch {epoch+1}/{epochs} - Loss: {total_loss/len(dataloader):.6f}")
 
-# --- EVALUACIÓN SIN ERRORES DE MEMORIA ---
+
 def evaluate(model, dataloader, device):
     model.eval()
-    preds_list, targets_list = [], []
+    preds, targets = [], []
 
     with torch.no_grad():
         for x, y in dataloader:
             x = x.to(device)
-            # Pasamos a CPU y numpy inmediatamente para no llenar la GPU
-            out = model(x).detach().cpu().numpy()
-            preds_list.append(out)
-            targets_list.append(y.numpy())
+            out = model(x).cpu().numpy()
+            preds.append(out)
+            targets.append(y.numpy())
 
-    return np.concatenate(preds_list, axis=0), np.concatenate(targets_list, axis=0)
+    return np.concatenate(preds), np.concatenate(targets)
 
-def load_split(name, base):
-    # En Colab, asegúrate de que la ruta exista
-    path = Path(base) / f"{name}.xlsx"
-    if not path.exists():
-        raise FileNotFoundError(f"No se encontró el archivo: {path}")
-        
-    df = pd.read_excel(path, index_col=0)
-    X_df = df.drop(columns=["Energy"])
-    y = df["Energy"].to_numpy(dtype=np.float32)
-    X = X_df.to_numpy(dtype=np.float32)
-    feature_columns = X_df.columns.tolist()
 
-    assert "Energy" not in feature_columns, "Energy leaked into features"
-    return X, y, feature_columns
-
-# --- FLUJO PRINCIPAL ---
+# ======================================================
+# =================== TRAIN MAIN =======================
+# ======================================================
 def main():
-    # 1. Configuración (Simulada si no tienes el .yaml a mano)
-    # Si tienes el yaml, descomenta las líneas de abajo:
-    # with open("config/timeseries.yaml") as f:
-    #     cfg = yaml.safe_load(f)["model"]
-    
-    cfg = {
-        "length": 168, "lag": 0, "output_window": 24, "batch_size": 32,
-        "epochs": 50, "learning_rate": 1e-3, "hidden_size": 64, 
-        "output_size": 24, "dropout": 0.1
-    }
+    # --------------------------------------------------
+    # Config
+    # --------------------------------------------------
+    with open("./config/timeseries.yaml") as f:
+        cfg = yaml.safe_load(f)["model"]
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Usando: {device}")
-    
-    # Rutas de datos (Ajusta a '/content/...' si usas Google Drive o carga local en Colab)
-    data_path = "data/Processed"
-    
-    train_x, train_y, feature_columns = load_split("train", data_path)
-    val_x, val_y, _ = load_split("val", data_path)
+    print(f"Using device: {device}")
+
+    DATA_PATH = "./data/Processed"
+
+    # --------------------------------------------------
+    # Load data
+    # --------------------------------------------------
+    train_x, train_y = load_split("train", DATA_PATH)
+    val_x, val_y = load_split("val", DATA_PATH)
+
     input_size = train_x.shape[1]
 
-    # 2. Datasets y Loaders
-    ds_train = TimeSeriesDataset(train_x, train_y, cfg["length"], cfg["lag"], cfg["output_window"])
-    ds_val = TimeSeriesDataset(val_x, val_y, cfg["length"], cfg["lag"], cfg["output_window"], stride=24)
+    # --------------------------------------------------
+    # Dataset & Loader
+    # --------------------------------------------------
+    ds_train = TimeSeriesDataset(
+        train_x, train_y,
+        cfg["length"], cfg["lag"], cfg["output_window"]
+    )
+    ds_val = TimeSeriesDataset(
+        val_x, val_y,
+        cfg["length"], cfg["lag"], cfg["output_window"],
+        stride=24
+    )
 
     dl_train = DataLoader(ds_train, batch_size=cfg["batch_size"], shuffle=True)
     dl_val = DataLoader(ds_val, batch_size=cfg["batch_size"], shuffle=False)
 
-    # 3. Modelos
-    models_dict = {
-        "LSTM": LSTM_two_layers(input_size, cfg["hidden_size"], cfg["output_size"], cfg["dropout"]),
-        "GRU": GRU_two_layers(input_size, cfg["hidden_size"], cfg["output_size"], cfg["dropout"]),
-        "LSTM_FCN": LSTM_FCN(input_size, cfg["hidden_size"], cfg["output_window"], cfg["dropout"]),
-        "Transformer": TransformerForecast(input_size, 128, 8, 4, 256, cfg["dropout"], cfg["output_window"]),
+    # --------------------------------------------------
+    # Load stats (para desnormalizar y MASE)
+    # --------------------------------------------------
+    with open(f"{DATA_PATH}/stats.pkl", "rb") as f:
+        stats = pickle.load(f)
+
+    y_mu = stats["Y"]["mu"]["Energy"]
+    y_std = stats["Y"]["std"]["Energy"]
+
+    train_y_real = train_y * y_std + y_mu
+
+    # --------------------------------------------------
+    # Models
+    # --------------------------------------------------
+    models = {
+        "LSTM": LSTM_two_layers(
+            input_size, cfg["hidden_size"], cfg["output_size"], cfg["dropout"]
+        ),
+        "GRU": GRU_two_layers(
+            input_size, cfg["hidden_size"], cfg["output_size"], cfg["dropout"]
+        ),
+        "LSTM_FCN": LSTM_FCN(
+            input_size, cfg["hidden_size"], cfg["output_window"], cfg["dropout"]
+        ),
+        "Transformer": TransformerForecast(
+            input_size=input_size,
+            d_model=128,
+            nhead=8,
+            num_layers=4,
+            dim_feedforward=256,
+            dropout=cfg["dropout"],
+            output_window=cfg["output_window"],
+        ),
     }
 
     best_mase = np.inf
     best_model_name = None
+    best_state = None
 
-    # 4. Loop de entrenamiento y selección
-    for name, model in models_dict.items():
-        print(f"\n--- Entrenando Modelo: {name} ---")
+    # --------------------------------------------------
+    # Training loop
+    # --------------------------------------------------
+    for name, model in models.items():
+        print(f"\n===== Training {name} =====")
         train_model(model, dl_train, cfg["epochs"], cfg["learning_rate"], device)
-        
+
         preds, targets = evaluate(model, dl_val, device)
 
-        # CORRECCIÓN DE EVALUACIÓN:
-        # Revertimos logaritmo (expm1) y evaluamos toda la ventana si es posible
-        # Si p y t son (N, 24), calculamos sobre el promedio o el primer punto
-        p_orig = np.expm1(preds)
-        t_orig = np.expm1(targets)
-        train_y_orig = np.expm1(train_y)
+        preds_real = preds * y_std + y_mu
+        targets_real = targets * y_std + y_mu
 
-        # Calculamos MASE sobre la primera predicción de la ventana (típico en forecasting)
-        # o puedes aplanar ambos para un MASE global.
-        m = mase(t_orig[:, 0], p_orig[:, 0], train_y_orig)
+        m = mase_daylight(
+            targets_real[:, 0],
+            preds_real[:, 0],
+            train_y_real,
+        )
 
-        print(f"Resultado {name} - MASE: {m:.4f}")
+        print(f"{name} → MASE (daylight): {m:.4f}")
 
         if m < best_mase:
             best_mase = m
             best_model_name = name
-            torch.save({
-                "model_name": name,
-                "state_dict": model.state_dict(),
-                "feature_columns": feature_columns,
-                "best_mase": best_mase,
-            }, "best_model.pth")
+            best_state = model.state_dict()
 
-    print(f"\n🏆 Proceso terminado. Mejor modelo: {best_model_name} con MASE: {best_mase:.4f}")
+    # --------------------------------------------------
+    # Save best model
+    # --------------------------------------------------
+    MODEL_PATH = "./checkpoints/best_model.pt"
+    Path(MODEL_PATH).parent.mkdir(parents=True, exist_ok=True)
+
+    torch.save({
+        "model_name": best_model_name,
+        "model_state_dict": best_state,
+        "config": cfg,
+    }, MODEL_PATH)
+
+    print(f"\nBest model: {best_model_name} (MASE={best_mase:.4f})")
+    print(f"Saved to: {MODEL_PATH}")
+
 
 if __name__ == "__main__":
     main()
