@@ -450,7 +450,6 @@ def pipeline():
     
     # 6. NORMALIZAR Y (Variable objetivo: Energía)
     # Paso A: Logaritmo (porque el entrenamiento se hizo sobre logaritmos)
-    #y_df_inf = transformar_y(y_df_inf)
     # Paso B: Z-Score con medias de entrenamiento
     y_df_inf = apply_stats(y_df_inf, y_cols, y_mu, y_std)
 
@@ -461,7 +460,40 @@ def pipeline():
     # 8. Unir y Guardar
     inference = unir_x_y(x_df_inf, y_df_inf)
     inference.to_excel(OUT_DIR / "inference.xlsx", index=True)
-    
+        # ==================================================
+    # ============ GUARDAR STATS PARA INFERENCE =========
+    # ==================================================
+
+    # y_train está estandarizada → volver a escala REAL
+    y_train_real = y_train["Energy"] * y_std["Energy"] + y_mu["Energy"]
+
+    # MASE scale (solo se calcula UNA VEZ, en TRAIN)
+    m = 24
+    naive_diff = np.abs(y_train_real[m:] - y_train_real[:-m])
+    mase_scale = np.mean(naive_diff)
+
+    stats = {
+        "X": {
+            "numeric_cols": x_cols,
+            "mu": x_mu,
+            "std": x_std,
+        },
+        "Y": {
+            "numeric_cols": y_cols,
+            "mu": y_mu,
+            "std": y_std,
+        },
+        "mase": {
+            "scale": mase_scale,
+            "m": m,
+        },
+    }
+
+    with open(OUT_DIR / "stats.pkl", "wb") as f:
+        pickle.dump(stats, f)
+
+    print("stats.pkl guardado correctamente en data/Processed/")
+
     print("Variables de X e Y normalizadas con éxito.")
     print("Columnas procesadas en X:", x_cols)
     print("Ejemplo de valores en X (deberían estar cerca de 0):")
