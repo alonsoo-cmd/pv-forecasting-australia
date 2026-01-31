@@ -119,7 +119,7 @@ def main():
     # --------------------------------------------------
     # Config
     # --------------------------------------------------
-    with open("./config/timeseries.yaml") as f:
+    with open("./config/timeseries.yaml", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)["model"]
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
