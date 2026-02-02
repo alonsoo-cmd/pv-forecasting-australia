@@ -86,7 +86,10 @@ def train_model(model, dataloader, epochs, lr, device):
             preds = model(x)
 
             if preds.shape != y.shape:
-                preds = preds.squeeze(-1)
+                if y.shape[-1] == 1 and y.dim() == preds.dim() + 1:
+                    y = y.squeeze(-1)
+                elif preds.shape[-1] == 1 and preds.dim() == y.dim() + 1:
+                    preds = preds.squeeze(-1)
 
             loss = loss_fn(preds, y)
             loss.backward()
@@ -106,6 +109,9 @@ def evaluate(model, dataloader, device):
         for x, y in dataloader:
             x = x.to(device)
             out = model(x).cpu().numpy()
+            y_np = y.numpy()
+            if y_np.shape[-1] == 1 and y_np.ndim == out.ndim + 1:
+                y_np = y_np.squeeze(-1)
             preds.append(out)
             targets.append(y.numpy())
 
