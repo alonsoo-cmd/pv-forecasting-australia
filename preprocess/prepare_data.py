@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 import pickle
+import pvlib
 
 #debemos normalizar de tal forma que haya muchos ceros 
 
@@ -138,6 +139,31 @@ def parsear_dt_iso_16(x_df, col="dt_iso", tz_destino=None):
 def eliminar_fechas_invalidas(x_df, col):
     return x_df.dropna(subset=[col])
 
+def agregar_geometria_solar(df, lat, lon, col_dt="dt_iso"):
+    """
+    Usa pvlib para calcular la posición exacta del sol.
+    Añade: solar_elevation (altura) y solar_azimuth (dirección).
+    """
+    df = df.copy()
+    
+    # Necesitamos un DatetimeIndex para pvlib
+    times = pd.DatetimeIndex(df[col_dt])
+    
+    # Definir la ubicación
+    site = pvlib.location.Location(lat, lon)
+    
+    # Calcular posición solar
+    solpos = site.get_solarposition(times)
+    
+    # Asignar al dataframe
+    df["solar_elevation"] = solpos["elevation"].values
+    df["solar_azimuth"] = solpos["azimuth"].values
+    
+    # Opcional: Zenith (90 - elevación), a veces útil
+    # df["solar_zenith"] = solpos["zenith"].values
+    
+    return df
+
 def extraer_features_circulares(df, col_dt="dt_iso"):
     """
     Mantengo tus fórmulas.
@@ -262,6 +288,15 @@ def preparar_x_df(x_df, tz_destino=None, valor_weather_nulo="desconocido"):
     x_df = parsear_dt_iso_16(x_df, tz_destino=tz_destino)
     
     x_df = eliminar_fechas_invalidas(x_df, col="dt_iso")
+
+    # agregar geometría solar si hay lat/lon
+    if "lat" in x_df.columns and "lon" in x_df.columns:
+        latitud = x_df["lat"].iloc[0]
+        longitud = x_df["lon"].iloc[0]
+        # Calculamos elevación y azimut
+        x_df = agregar_geometria_solar(x_df, latitud, longitud, col_dt="dt_iso")
+    else:
+        print("ADVERTENCIA: No se encontraron columnas 'lat'/'lon'. No se calculó geometría solar.")
     
     # features circulares (tus fórmulas)
     x_df = extraer_features_circulares(x_df, col_dt="dt_iso")
