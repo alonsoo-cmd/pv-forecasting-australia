@@ -2,12 +2,13 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 import pickle
+import pvlib
 
 #debemos normalizar de tal forma que haya muchos ceros 
 
 # Rutas
-ruta_y = "../data/Raw/pv_dataset_full.xlsx"
-ruta_x = "../data/Raw/wx_dataset_full.xlsx"
+ruta_y = "data/Raw/pv_dataset_full.xlsx"
+ruta_x = "data/Raw/wx_dataset_full.xlsx"
 OUT_DIR = Path("../data/Processed")
 
 def normalizar_dt_df(df, col=None):
@@ -90,6 +91,20 @@ def rellenar_weather_description(x_df, valor="desconocido"):
     x_df["weather_description"] = x_df["weather_description"].fillna(valor)
     return x_df
 
+def one_hot_encode_weather(x_df, col="weather_description"):
+    """
+    Convierte la columna categórica en múltiples columnas binarias (0/1).
+    Ej: weather_description -> w_desc_rain, w_desc_sun, etc.
+    """
+    x_df = x_df.copy()
+    # dtype=int asegura que sean 0 y 1 numéricos, no booleanos
+    dummies = pd.get_dummies(x_df[col], prefix="w_desc", dtype=int)
+    
+    # Concatenar y eliminar la original
+    x_df = pd.concat([x_df, dummies], axis=1)
+    if col in x_df.columns:
+        x_df = x_df.drop(columns=[col])
+    return x_df
 
 def factorizar_weather_description(x_df, col="weather_description", sort=True):
     x_df = x_df.copy()
@@ -101,8 +116,6 @@ def transformar_y(y):
     y = y.copy()
     y["Energy"] = np.log1p(y["Energy"])
     return y
-
-
 
 def parsear_dt_iso_16(x_df, col="dt_iso", tz_destino=None):
     """
@@ -123,12 +136,33 @@ def parsear_dt_iso_16(x_df, col="dt_iso", tz_destino=None):
     x_df[col] = s
     return x_df
 
-
-
-
 def eliminar_fechas_invalidas(x_df, col):
     return x_df.dropna(subset=[col])
 
+def agregar_geometria_solar(df, lat, lon, col_dt="dt_iso"):
+    """
+    Usa pvlib para calcular la posición exacta del sol.
+    Añade: solar_elevation (altura) y solar_azimuth (dirección).
+    """
+    df = df.copy()
+    
+    # Necesitamos un DatetimeIndex para pvlib
+    times = pd.DatetimeIndex(df[col_dt])
+    
+    # Definir la ubicación
+    site = pvlib.location.Location(lat, lon)
+    
+    # Calcular posición solar
+    solpos = site.get_solarposition(times)
+    
+    # Asignar al dataframe
+    df["solar_elevation"] = solpos["elevation"].values
+    df["solar_azimuth"] = solpos["azimuth"].values
+    
+    # Opcional: Zenith (90 - elevación), a veces útil
+    # df["solar_zenith"] = solpos["zenith"].values
+    
+    return df
 
 def extraer_features_circulares(df, col_dt="dt_iso"):
     """
@@ -154,10 +188,8 @@ def extraer_features_circulares(df, col_dt="dt_iso"):
     df = df.drop(columns=["hour", "month", "weekday"])
     return df
 
-
 def ordenar_y_indexar_por_fecha(df, col="dt_iso"):
     return df.sort_values(col).set_index(col)
-
 
 def quitar_timezone_indice(df):
     """
@@ -168,13 +200,11 @@ def quitar_timezone_indice(df):
         df.index = df.index.tz_localize(None)
     return df
 
-
 def replace_na(df, col):
     df = df.copy()
     if col in df.columns:
         df[col] = df[col].fillna(0)
     return df
-
 
 def eliminar_columnas_no_informativas(x_df, cols_a_eliminar):
     x_df = x_df.copy()
@@ -182,7 +212,6 @@ def eliminar_columnas_no_informativas(x_df, cols_a_eliminar):
     if cols_existentes:
         x_df.drop(columns=cols_existentes, inplace=True)
     return x_df
-
 
 # -----------------------------
 # Split temporal por índices (NO inteligente)
@@ -204,7 +233,6 @@ def split_por_indices(df, train_frac=0.7, val_frac=0.15):
     test  = df.iloc[val_end:].copy()
 
     return train, val, test
-
 
 # -----------------------------
 # Normalización SIN leakage
@@ -229,11 +257,10 @@ def fit_stats(train_df):
     std = train_df[numeric_cols].std().replace(0, 1.0)
     return numeric_cols, mu, std
 
-
-
 def apply_stats(df: pd.DataFrame, numeric_cols, mu, std):
     df = df.copy()
-    df[numeric_cols] = (df[numeric_cols] - mu) / std
+    cols_to_normalize = [c for c in numeric_cols if c in df.columns]
+    df[cols_to_normalize] = (df[cols_to_normalize] - mu) / std
     return df
 
 def cargar_stats(out_dir=OUT_DIR, filename="stats.pkl"):
@@ -249,7 +276,6 @@ def cargar_stats(out_dir=OUT_DIR, filename="stats.pkl"):
         stats["Y"]["std"],
     )
 
-
 # -----------------------------
 # Preparación X e Y
 # -----------------------------
@@ -257,11 +283,20 @@ def preparar_x_df(x_df, tz_destino=None, valor_weather_nulo="desconocido"):
     x_df = x_df.copy()
     x_df = rellenar_weather_description(x_df, valor=valor_weather_nulo)
     
-    x_df = factorizar_weather_description(x_df, col="weather_description", sort=True)
+    x_df = one_hot_encode_weather(x_df, col="weather_description")
     # parse datetime
     x_df = parsear_dt_iso_16(x_df, tz_destino=tz_destino)
     
     x_df = eliminar_fechas_invalidas(x_df, col="dt_iso")
+
+    # agregar geometría solar si hay lat/lon
+    if "lat" in x_df.columns and "lon" in x_df.columns:
+        latitud = x_df["lat"].iloc[0]
+        longitud = x_df["lon"].iloc[0]
+        # Calculamos elevación y azimut
+        x_df = agregar_geometria_solar(x_df, latitud, longitud, col_dt="dt_iso")
+    else:
+        print("ADVERTENCIA: No se encontraron columnas 'lat'/'lon'. No se calculó geometría solar.")
     
     # features circulares (tus fórmulas)
     x_df = extraer_features_circulares(x_df, col_dt="dt_iso")
@@ -290,14 +325,10 @@ def split_por_indices(df, train_frac=0.7, val_frac=0.15):
 
     return train, val, test
 
-
-
 def dividir(x_df, train_frac=0.8, val_frac=0.10):
     # split por índices (temporal)
     train, val, test = split_por_indices(x_df, train_frac=train_frac, val_frac=val_frac)
     return train, val, test
-
-
 
 def normalizar_df(train, val, test, quitar_tz_excel=True):
      # normalización sin leakage (fit en train)
@@ -353,18 +384,14 @@ def preparar_y_df(y_df):
     y_df = ordenar_y_indexar_por_fecha(y_df, col="dt_iso")
     return y_df
 
-
 def normalizar_indice_horario(df):
     df = df.copy()
     df.index = pd.to_datetime(df.index).dt.floor("H")
     return df
 
-
 def dividir(y_df, train_frac=0.8, val_frac=0.10):
     train, val, test = split_por_indices(y_df, train_frac=train_frac, val_frac=val_frac)
     return train, val, test
-
-
 
 def dividir_y_normalizar_df(y_df, train_frac=0.7, val_frac=0.15):
     # split temporal
@@ -409,13 +436,16 @@ def pipeline():
 
     print(f"MASE scale (real series): {mase_scale:.4f}")
 
-
     # alinear por tiempo
     x_df, y_df = x_df.align(y_df, join="inner", axis=0)
 
     # split X
 
     x_train, x_val, x_test = dividir(x_df, train_frac=0.8, val_frac=0.10)
+
+    train_columns = x_train.columns
+    print(f"Columnas en Train (Total {len(train_columns)}):", list(train_columns))
+
     x_cols, x_mu, x_std = fit_stats(x_train)
     x_train = normalizar_df(x_train, x_cols, x_mu, x_std, quitar_tz_excel=True)
     x_val = normalizar_df(x_val, x_cols, x_mu, x_std, quitar_tz_excel=True)
@@ -432,14 +462,11 @@ def pipeline():
     val   = unir_x_y(x_val, y_val)
     test  = unir_x_y(x_test, y_test)
 
-
     # guardar conjuntos
     save_joint_splits(train, val, test, OUT_DIR)
     print("Train:", train.shape)
     print("Val:", val.shape)
     print("Test:", test.shape)
-    
-
 
     print("\n--- Iniciando Normalización de Inferencia ---")
     
@@ -455,6 +482,15 @@ def pipeline():
     x_df_inf = normalizar_dt_df(x_df_inf)
     y_df_inf = normalizar_dt_df(y_df_inf)
     x_df_inf, y_df_inf = x_df_inf.align(y_df_inf, join="inner", axis=0)
+
+    # 4. Asegurar que las columnas de x_df_inf coincidan con las de train
+    # 1. Añadir columnas faltantes con ceros
+    missing_cols = set(train_columns) - set(x_df_inf.columns)
+    for c in missing_cols:
+        x_df_inf[c] = 0
+    
+    # 2. Reordenar y eliminar sobrantes para que sea idéntico a Train
+    x_df_inf = x_df_inf[train_columns]
 
     # 5. NORMALIZAR X (Variables de entrada: Temperatura, nubes, etc.)
     # Aquí es donde fallaba: aplicamos las stats de entrenamiento a x_df_inf
@@ -478,9 +514,6 @@ def pipeline():
 
     # y_train está estandarizada → volver a escala REAL
     
-
-    
-
     stats = {
         "X": {
             "numeric_cols": x_cols,
