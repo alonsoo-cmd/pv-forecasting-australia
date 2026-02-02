@@ -6,8 +6,8 @@ import pickle
 #debemos normalizar de tal forma que haya muchos ceros 
 
 # Rutas
-ruta_y = "../data/Raw/pv_dataset_full.xlsx"
-ruta_x = "../data/Raw/wx_dataset_full.xlsx"
+ruta_y = "data/Raw/pv_dataset_full.xlsx"
+ruta_x = "data/Raw/wx_dataset_full.xlsx"
 OUT_DIR = Path("../data/Processed")
 
 def normalizar_dt_df(df, col=None):
